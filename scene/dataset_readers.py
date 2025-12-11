@@ -34,6 +34,8 @@ class CameraInfo(NamedTuple):
     image_name: str
     width: int
     height: int
+    # 修改一：新增mask (預設為 None)
+    mask: np.array = None
 
 class SceneInfo(NamedTuple):
     point_cloud: BasicPointCloud
@@ -98,8 +100,39 @@ def readColmapCameras(cam_extrinsics, cam_intrinsics, images_folder):
         image_name = os.path.basename(image_path).split(".")[0]
         image = Image.open(image_path)
 
+        # ===========================================================
+        # 修改二：新增讀取 Mask 的邏輯 
+        # 結構是:
+        # 圖片: .../images/001001/00001.jpg
+        # Mask: .../masks/001001/00001.png
+        
+        # 將路徑中的 'images' 替換為 'masks'
+        mask_path = image_path.replace("images", "masks")
+        
+        # 處理副檔名 (圖片是 jpg, 但 Mask 是 png)
+        if mask_path.endswith(".jpg") or mask_path.endswith(".JPG"):
+             mask_path = os.path.splitext(mask_path)[0] + ".png"
+
+        loaded_mask = None
+        if os.path.exists(mask_path):
+            # 讀取 Mask 並轉為單通道 (L mode: 0-255)
+            mask_pil = Image.open(mask_path).convert('L')
+            
+            # 轉為 numpy array 並歸一化到 0.0 ~ 1.0
+            loaded_mask = np.array(mask_pil) / 255.0
+            
+            # 確保維度正確 (H, W) -> (1, H, W) 或是保持 (H, W)
+            # 這裡我們先存成 numpy，晚點在 cameras.py 再轉 Tensor
+        else:
+            # 沒找到 mask 的話，設為 None
+            # print(f"Warning: No mask found for {image_name}")
+            pass
+        # ===========================================================
+
+        # 修改三：把 mask=loaded_mask 傳進CameraInfo
         cam_info = CameraInfo(uid=uid, R=R, T=T, FovY=FovY, FovX=FovX, image=image,
-                              image_path=image_path, image_name=image_name, width=width, height=height)
+                              image_path=image_path, image_name=image_name, width=width, height=height,
+                              mask=loaded_mask)
         cam_infos.append(cam_info)
     sys.stdout.write('\n')
     return cam_infos

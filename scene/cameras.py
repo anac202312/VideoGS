@@ -40,10 +40,28 @@ class Camera(nn.Module):
         self.image_width = self.original_image.shape[2]
         self.image_height = self.original_image.shape[1]
 
+        # ===========================================================
+        # 修改一：處理 mask
+        # 除了應用 mask 到圖片上，還要將 mask 獨立存下來
+        
         if gt_alpha_mask is not None:
-            self.original_image *= gt_alpha_mask.to(self.data_device)
+            # 1. 將 mask 傳送到 GPU 並儲存為物件屬性 (這行是為了讓 compute_static_mask 讀取)
+            self.original_image_mask = gt_alpha_mask.to(self.data_device)
+            
+            # 2. (保留原本功能) 將圖片與 Mask 相乘 (把背景變黑)
+            self.original_image *= self.original_image_mask
         else:
-            self.original_image *= torch.ones((1, self.image_height, self.image_width), device=self.data_device)
+            # 如果沒有 mask，就建立一個全白的 mask (全 1.0)，代表所有區域都是有效的
+            self.original_image_mask = torch.ones((1, self.image_height, self.image_width), device=self.data_device)
+            
+            # 圖片乘上全白 mask (數值不變)
+            self.original_image *= self.original_image_mask
+        # ============================================================
+
+        #if gt_alpha_mask is not None:
+        #    self.original_image *= gt_alpha_mask.to(self.data_device)
+        #else:
+        #    self.original_image *= torch.ones((1, self.image_height, self.image_width), device=self.data_device)
 
         self.zfar = 100.0
         self.znear = 0.01
