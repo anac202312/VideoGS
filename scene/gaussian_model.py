@@ -464,6 +464,84 @@ class GaussianModel:
         self.xyz_gradient_accum[update_filter] += torch.norm(viewspace_point_tensor.grad[update_filter,:2], dim=-1, keepdim=True)
         self.denom[update_filter] += 1
 
+    def compute_static_mask(self, cameras, threshold=0.5):
+        """
+        計算每個 Gaussian 是否為靜態 (落在 Mask 白色區域的頻率)
+        cameras: 包含所有訓練相機的列表 (viewpoint_stack)
+        threshold: 超過多少比例的相機認為它是靜態，就鎖定它
+        """
+        print("\n[GaussianModel] 正在計算靜態鎖定遮罩 (Static Mask Computation)...")
+        
+        # 取得目前的 3D 座標
+        xyz = self._xyz
+        n_points = xyz.shape[0]
+        
+        # 初始化投票箱 (儲存累積的 Mask 值)
+        static_score = torch.zeros(n_points, device="cuda")
+        valid_views_count = torch.zeros(n_points, device="cuda")
+        
+        with torch.no_grad():
+            for cam in cameras:
+                # 1. 取得投影矩陣 (World -> Clip space)
+                # 注意：3DGS 的 full_proj_transform 通常是 (4,4)
+                full_proj = cam.full_proj_transform.cuda()
+                
+                # 2. 將 3D 點轉為齊次座標 (N, 4)
+                ones = torch.ones((n_points, 1), device="cuda")
+                points_hom = torch.cat((xyz, ones), dim=1)
+                
+                # 3. 投影計算: Points * Matrix
+                # 投影後的座標 (N, 4)
+                p_hom = torch.matmul(points_hom, full_proj)
+                p_w = p_hom[:, 3:4]
+                
+                # 4. 轉為 NDC (-1 ~ 1)
+                # 為了避免除以 0，加一個極小值
+                p_ndc = p_hom[:, :3] / (p_w + 1e-7)
+                
+                # 5. 檢查是否在視錐體內 (z > 0 且 x,y 在 -1~1 之間)
+                # 這裡簡化檢查：只看投影座標是否落在圖片範圍內
+                
+                # 6. NDC 轉 Pixel 座標
+                H, W = cam.image_height, cam.image_width
+                # x: -1->0, 1->W; y: -1->0, 1->H
+                u = ((p_ndc[:, 0] + 1) * W - 1) * 0.5
+                v = ((p_ndc[:, 1] + 1) * H - 1) * 0.5
+                
+                # 7. 邊界檢查 (Valid Mask)
+                valid_mask = (u >= 0) & (u < W) & (v >= 0) & (v < H) & (p_w[:, 0] > 0.01)
+                
+                # 8. 讀取該相機的 Mask
+                # 假設 mask 已經是 Tensor 且在 CUDA 上 (H, W)
+                # 如果你的 mask 是 (1, H, W) 需要 squeeze
+                mask = cam.original_image_mask.cuda() 
+                if len(mask.shape) == 3:
+                    mask = mask[0] # 取第一層 channel
+
+                # 9. 取樣 Mask 值
+                # 將浮點數座標轉為整數索引
+                u_idx = u.long().clamp(0, W-1)
+                v_idx = v.long().clamp(0, H-1)
+                
+                # 只有在畫面內的點才去查 Mask
+                # mask_values: 若為 1.0 代表靜態, 0.0 代表動態
+                current_mask_values = mask[v_idx, u_idx]
+                
+                # 累加分數
+                static_score[valid_mask] += current_mask_values[valid_mask]
+                valid_views_count[valid_mask] += 1.0
+
+        # 計算平均分數 (總分 / 被看到的次數)
+        # 避免除以 0
+        valid_views_count[valid_views_count == 0] = 1.0
+        final_ratio = static_score / valid_views_count
+        
+        # 判定是否為靜態 (大於閾值)
+        self.is_static_gs = (final_ratio > threshold)
+        
+        count_static = self.is_static_gs.sum().item()
+        print(f"[GaussianModel] 統計完成: 共有 {count_static} / {n_points} ({count_static/n_points:.2%}) 個點被鎖定為靜態。")
+
 class GTPRTGaussianModel:
 
     def setup_functions(self):
@@ -1099,80 +1177,4 @@ class GTPT_wo_hash_GaussianModel:
 
         self.active_sh_degree = self.max_sh_degree
     
-    def compute_static_mask(self, cameras, threshold=0.5):
-        """
-        計算每個 Gaussian 是否為靜態 (落在 Mask 白色區域的頻率)
-        cameras: 包含所有訓練相機的列表 (viewpoint_stack)
-        threshold: 超過多少比例的相機認為它是靜態，就鎖定它
-        """
-        print("\n[GaussianModel] 正在計算靜態鎖定遮罩 (Static Mask Computation)...")
-        
-        # 取得目前的 3D 座標
-        xyz = self._xyz
-        n_points = xyz.shape[0]
-        
-        # 初始化投票箱 (儲存累積的 Mask 值)
-        static_score = torch.zeros(n_points, device="cuda")
-        valid_views_count = torch.zeros(n_points, device="cuda")
-        
-        with torch.no_grad():
-            for cam in cameras:
-                # 1. 取得投影矩陣 (World -> Clip space)
-                # 注意：3DGS 的 full_proj_transform 通常是 (4,4)
-                full_proj = cam.full_proj_transform.cuda()
-                
-                # 2. 將 3D 點轉為齊次座標 (N, 4)
-                ones = torch.ones((n_points, 1), device="cuda")
-                points_hom = torch.cat((xyz, ones), dim=1)
-                
-                # 3. 投影計算: Points * Matrix
-                # 投影後的座標 (N, 4)
-                p_hom = torch.matmul(points_hom, full_proj)
-                p_w = p_hom[:, 3:4]
-                
-                # 4. 轉為 NDC (-1 ~ 1)
-                # 為了避免除以 0，加一個極小值
-                p_ndc = p_hom[:, :3] / (p_w + 1e-7)
-                
-                # 5. 檢查是否在視錐體內 (z > 0 且 x,y 在 -1~1 之間)
-                # 這裡簡化檢查：只看投影座標是否落在圖片範圍內
-                
-                # 6. NDC 轉 Pixel 座標
-                H, W = cam.image_height, cam.image_width
-                # x: -1->0, 1->W; y: -1->0, 1->H
-                u = ((p_ndc[:, 0] + 1) * W - 1) * 0.5
-                v = ((p_ndc[:, 1] + 1) * H - 1) * 0.5
-                
-                # 7. 邊界檢查 (Valid Mask)
-                valid_mask = (u >= 0) & (u < W) & (v >= 0) & (v < H) & (p_w[:, 0] > 0.01)
-                
-                # 8. 讀取該相機的 Mask
-                # 假設 mask 已經是 Tensor 且在 CUDA 上 (H, W)
-                # 如果你的 mask 是 (1, H, W) 需要 squeeze
-                mask = cam.original_image_mask.cuda() 
-                if len(mask.shape) == 3:
-                    mask = mask[0] # 取第一層 channel
-
-                # 9. 取樣 Mask 值
-                # 將浮點數座標轉為整數索引
-                u_idx = u.long().clamp(0, W-1)
-                v_idx = v.long().clamp(0, H-1)
-                
-                # 只有在畫面內的點才去查 Mask
-                # mask_values: 若為 1.0 代表靜態, 0.0 代表動態
-                current_mask_values = mask[v_idx, u_idx]
-                
-                # 累加分數
-                static_score[valid_mask] += current_mask_values[valid_mask]
-                valid_views_count[valid_mask] += 1.0
-
-        # 計算平均分數 (總分 / 被看到的次數)
-        # 避免除以 0
-        valid_views_count[valid_views_count == 0] = 1.0
-        final_ratio = static_score / valid_views_count
-        
-        # 判定是否為靜態 (大於閾值)
-        self.is_static_gs = (final_ratio > threshold)
-        
-        count_static = self.is_static_gs.sum().item()
-        print(f"[GaussianModel] 統計完成: 共有 {count_static} / {n_points} ({count_static/n_points:.2%}) 個點被鎖定為靜態。")
+    
