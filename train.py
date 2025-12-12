@@ -91,13 +91,32 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
         if (iteration - 1) == debug_from:
             pipe.debug = True
 
-        bg = torch.rand((3), device="cuda") if opt.random_background else background
+        # ================= [修改 1] 強制使用隨機背景 =================
+        # 原本是: bg = torch.rand((3), device="cuda") if opt.random_background else background
+        # 改成強制隨機，這樣每次訓練背景顏色都會變 (紅、綠、藍...)
+        # 這會強迫模型不能生成「黑色板子」，否則會跟變動的背景色衝突
+        bg = torch.rand((3), device="cuda") 
+        # ==========================================================
+
+      #  bg = torch.rand((3), device="cuda") if opt.random_background else background
 
         render_pkg = render(viewpoint_cam, gaussians, pipe, bg)
         image, viewspace_point_tensor, visibility_filter, radii = render_pkg["render"], render_pkg["viewspace_points"], render_pkg["visibility_filter"], render_pkg["radii"]
 
         # Loss
         gt_image = viewpoint_cam.original_image.cuda()
+
+        # ================= [修改 2] 混合 GT 圖片與隨機背景 =================
+        # 這是最關鍵的一步！
+        # 我們要把你的「黑色背景原圖」跟剛剛生成的「隨機背景」混合
+        # 公式：GT = (原圖 * Mask) + (隨機背景 * (1 - Mask))
+        
+        gt_mask = viewpoint_cam.original_image_mask.cuda()
+        
+        # 使用廣播機制將 (3) 的背景色套用到 (3, H, W) 的圖片上
+        gt_image = gt_image * gt_mask + bg[:, None, None] * (1.0 - gt_mask)
+        # =================================================================
+        
         Ll1 = l1_loss(image, gt_image)
         loss = (1.0 - opt.lambda_dssim) * Ll1 + opt.lambda_dssim * (1.0 - ssim(image, gt_image))
         loss.backward()
