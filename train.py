@@ -38,7 +38,8 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
         (model_params, first_iter) = torch.load(checkpoint)
         gaussians.restore(model_params, opt)
 
-    bg_color = [1, 1, 1] if dataset.white_background else [0, 0, 0]
+    #bg_color = [1, 1, 1] if dataset.white_background else [0, 0, 0]
+    bg_color = [0, 0, 0] # <--- 強制黑色
     background = torch.tensor(bg_color, dtype=torch.float32, device="cuda")
 
     iter_start = torch.cuda.Event(enable_timing = True)
@@ -70,11 +71,11 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
 
         # ==============================================================
         # 修改一：在第 3000 次迭代時計算靜態遮罩
-        if iteration == 3000:
-            print(f"\n[ITER {iteration}] 開始計算 Static Mask (鎖定靜態物體)...")
-            # 注意：必須傳入完整的訓練相機列表，而不是被 pop 過的 stack
-            full_cam_list = scene.getTrainCameras()
-            gaussians.compute_static_mask(full_cam_list, threshold=0.6)
+        #if iteration == 3000:
+        #    print(f"\n[ITER {iteration}] 開始計算 Static Mask (鎖定靜態物體)...")
+        #    # 注意：必須傳入完整的訓練相機列表，而不是被 pop 過的 stack
+        #    full_cam_list = scene.getTrainCameras()
+        #    gaussians.compute_static_mask(full_cam_list, threshold=0.6)
         # ==============================================================
 
 
@@ -126,30 +127,34 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
         # ==============================================================
         # 修改二：鎖定靜態物體的參數，不讓它們動
         # 只要 compute_static_mask 跑過，有了 is_static_gs 屬性，就開始鎖定
-        if iteration >= 3000 and hasattr(gaussians, "is_static_gs"):
-            with torch.no_grad():
-                # 取得靜態點的 boolean mask
-                static_mask = gaussians.is_static_gs
+        # if iteration >= 3000 and hasattr(gaussians, "is_static_gs"):
+        #     # [Auto-Fix] 檢查點數量是否變化
+        #     if gaussians._xyz.shape[0] != gaussians.is_static_gs.shape[0]:
+        #         full_cam_list = scene.getTrainCameras()
+        #         gaussians.compute_static_mask(full_cam_list, threshold=0.6)
+
+        #     with torch.no_grad():
+        #         static_mask = gaussians.is_static_gs
                 
-                # 1. 鎖定位置 (XYZ) - 讓它定在原地
-                if gaussians._xyz.grad is not None:
-                    gaussians._xyz.grad[static_mask] = 0.0
+        #         if gaussians._xyz.grad is not None:
+        #             gaussians._xyz.grad[static_mask] = 0.0
                     
-                # 2. 鎖定旋轉 (Rotation)
-                if gaussians._rotation.grad is not None:
-                    gaussians._rotation.grad[static_mask] = 0.0
+        #         # 2. 鎖定旋轉 (Rotation)
+        #         if gaussians._rotation.grad is not None:
+        #             gaussians._rotation.grad[static_mask] = 0.0
                     
-                # 3. 鎖定縮放 (Scaling)
-                if gaussians._scaling.grad is not None:
-                    gaussians._scaling.grad[static_mask] = 0.0
+        #         # 3. 鎖定縮放 (Scaling)
+        #         if gaussians._scaling.grad is not None:
+        #             gaussians._scaling.grad[static_mask] = 0.0
                 
-                # 4. (選用) 鎖定顏色/不透明度
-                # 如果你希望它連光影變化都不要有，可以把這兩行打開：
-                if gaussians._features_dc.grad is not None:
-                   gaussians._features_dc.grad[static_mask] = 0.0
-                if gaussians._opacity.grad is not None:
-                   gaussians._opacity.grad[static_mask] = 0.0
+        #         # 4. (選用) 鎖定顏色/不透明度
+        #         # 如果你希望它連光影變化都不要有，可以把這兩行打開：
+        #         if gaussians._features_dc.grad is not None:
+        #            gaussians._features_dc.grad[static_mask] = 0.0
+        #         if gaussians._opacity.grad is not None:
+        #            gaussians._opacity.grad[static_mask] = 0.0
         # ==============================================================
+        
 
         with torch.no_grad():
             # Progress bar
