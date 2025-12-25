@@ -3,7 +3,7 @@
 # GRAPHDECO research group, https://team.inria.fr/graphdeco
 # All rights reserved.
 #
-# This software is free for non-commercial, research and evaluation use 
+# This software is free for non-commercial, research and evaluation use
 # under the terms of the LICENSE.md file.
 #
 # For inquiries contact  george.drettakis@inria.fr
@@ -13,7 +13,7 @@ import os
 import sys
 from PIL import Image
 from typing import NamedTuple
-from scene.colmap_loader import read_extrinsics_text, read_intrinsics_text, qvec2rotmat, rotmat2qvec, \
+from scene.colmap_loader import read_extrinsics_text, read_intrinsics_text, qvec2rotmat, rotmat2qvec, \\
     read_extrinsics_binary, read_intrinsics_binary, read_points3D_binary, read_points3D_text
 from utils.graphics_utils import getWorld2View2, focal2fov, fov2focal
 import numpy as np
@@ -34,7 +34,6 @@ class CameraInfo(NamedTuple):
     image_name: str
     width: int
     height: int
-    # 修改一：新增mask (預設為 None)
     mask: np.array = None
 
 class SceneInfo(NamedTuple):
@@ -70,7 +69,7 @@ def getNerfppNorm(cam_info):
 def readColmapCameras(cam_extrinsics, cam_intrinsics, images_folder):
     cam_infos = []
     for idx, key in enumerate(cam_extrinsics):
-        sys.stdout.write('\r')
+        sys.stdout.write('\\r')
         # the exact output you're looking for:
         sys.stdout.write("Reading camera {}/{}".format(idx+1, len(cam_extrinsics)))
         sys.stdout.flush()
@@ -84,11 +83,25 @@ def readColmapCameras(cam_extrinsics, cam_intrinsics, images_folder):
         R = np.transpose(qvec2rotmat(extr.qvec))
         T = np.array(extr.tvec)
 
-        if intr.model=="SIMPLE_PINHOLE":
+        # 1. 支援多種相機模型
+        if intr.model == "SIMPLE_PINHOLE":
             focal_length_x = intr.params[0]
             FovY = focal2fov(focal_length_x, height)
             FovX = focal2fov(focal_length_x, width)
-        elif intr.model=="PINHOLE":
+        elif intr.model == "PINHOLE":
+            focal_length_x = intr.params[0]
+            focal_length_y = intr.params[1]
+            FovY = focal2fov(focal_length_y, height)
+            FovX = focal2fov(focal_length_x, width)
+        elif intr.model == "SIMPLE_RADIAL":
+            focal_length_x = intr.params[0]
+            FovY = focal2fov(focal_length_x, height)
+            FovX = focal2fov(focal_length_x, width)
+        elif intr.model == "RADIAL":
+            focal_length_x = intr.params[0]
+            FovY = focal2fov(focal_length_x, height)
+            FovX = focal2fov(focal_length_x, width)
+        elif intr.model == "OPENCV":
             focal_length_x = intr.params[0]
             focal_length_y = intr.params[1]
             FovY = focal2fov(focal_length_y, height)
@@ -96,45 +109,51 @@ def readColmapCameras(cam_extrinsics, cam_intrinsics, images_folder):
         else:
             assert False, "Colmap camera model not handled: only undistorted datasets (PINHOLE or SIMPLE_PINHOLE cameras) supported!"
 
-        image_path = os.path.join(images_folder, os.path.basename(extr.name))
-        image_name = os.path.basename(image_path).split(".")[0]
-        image = Image.open(image_path)
+        # 2. 處理路徑邏輯 (支援資料夾結構)
+        # 原始路徑，例如: .../images/010001.png
+        original_image_path = os.path.join(images_folder, os.path.basename(extr.name))
+        image_path = original_image_path
 
-        # ===========================================================
-        # 修改二：新增讀取 Mask 的邏輯 
-        # 結構是:
-        # 圖片: .../images/001001/00001.jpg
-        # Mask: .../masks/001001/00001.png
-        
-        # 將路徑中的 'images' 替換為 'masks'
+        # 如果檔案不存在 (因為它是個資料夾)，我們就去找資料夾裡的第一張圖
+        if not os.path.exists(image_path):
+            # 去掉副檔名取得資料夾名稱 (010001.png -> 010001)
+            folder_name = os.path.splitext(os.path.basename(extr.name))[0]
+            folder_path = os.path.join(images_folder, folder_name)
+
+            if os.path.isdir(folder_path):
+                # 找到資料夾內第一張 jpg 或 png
+                valid_files = sorted([f for f in os.listdir(folder_path) if f.lower().endswith(('.jpg', '.jpeg', '.png'))])
+                if len(valid_files) > 0:
+                    # 更新路徑指向第一張圖 (例如 .../images/010001/00001.jpg)
+                    image_path = os.path.join(folder_path, valid_files[0])
+                    # print(f"Redirecting {extr.name} -> {valid_files[0]}")
+
+        image_name = os.path.basename(image_path).split(".")[0]
+
+        try:
+            image = Image.open(image_path)
+        except FileNotFoundError:
+            print(f"\\n❌ Error: Still cannot find image for camera {extr.name}")
+            print(f"   Looked at: {image_path}")
+            continue # 跳過這張圖避免程式崩潰
+
+        # 3. 讀取 Mask (邏輯會自動跟隨 image_path)
+        # 如果 image_path 是 .../images/010001/00001.jpg
+        # mask_path 就會變成 .../masks/010001/00001.png
         mask_path = image_path.replace("images", "masks")
-        
-        # 處理副檔名 (圖片是 jpg, 但 Mask 是 png)
         if mask_path.endswith(".jpg") or mask_path.endswith(".JPG"):
              mask_path = os.path.splitext(mask_path)[0] + ".png"
 
         loaded_mask = None
         if os.path.exists(mask_path):
-            # 讀取 Mask 並轉為單通道 (L mode: 0-255)
             mask_pil = Image.open(mask_path).convert('L')
-            
-            # 轉為 numpy array 並歸一化到 0.0 ~ 1.0
             loaded_mask = np.array(mask_pil) / 255.0
-            
-            # 確保維度正確 (H, W) -> (1, H, W) 或是保持 (H, W)
-            # 這裡我們先存成 numpy，晚點在 cameras.py 再轉 Tensor
-        else:
-            # 沒找到 mask 的話，設為 None
-            # print(f"Warning: No mask found for {image_name}")
-            pass
-        # ===========================================================
 
-        # 修改三：把 mask=loaded_mask 傳進CameraInfo
         cam_info = CameraInfo(uid=uid, R=R, T=T, FovY=FovY, FovX=FovX, image=image,
                               image_path=image_path, image_name=image_name, width=width, height=height,
                               mask=loaded_mask)
         cam_infos.append(cam_info)
-    sys.stdout.write('\n')
+    sys.stdout.write('\\n')
     return cam_infos
 
 def fetchPly(path):
@@ -157,7 +176,7 @@ def storePly(path, xyz, rgb):
     dtype = [('x', 'f4'), ('y', 'f4'), ('z', 'f4'),
             ('nx', 'f4'), ('ny', 'f4'), ('nz', 'f4'),
             ('red', 'u1'), ('green', 'u1'), ('blue', 'u1')]
-    
+
     normals = np.zeros_like(xyz)
 
     elements = np.empty(xyz.shape[0], dtype=dtype)
@@ -224,7 +243,7 @@ def readCamerasFromTransforms(path, transformsfile, white_background, extension=
         frames = contents["frames"]
         for idx, frame in enumerate(frames):
             cam_name =  frame["file_path"]
-            
+
             flip_mat = np.array([
                 [1, 0, 0, 0],
                 [0, -1, 0, 0],
@@ -262,7 +281,7 @@ def readCamerasFromTransforms(path, transformsfile, white_background, extension=
 
             cam_infos.append(CameraInfo(uid=idx, R=R, T=T, FovY=FovY, FovX=FovX, image=image,
                             image_path=image_path, image_name=image_name, width=image.size[0], height=image.size[1]))
-            
+
     return cam_infos
 
 def readNerfSyntheticInfo(path, white_background, eval, extension=".png", ply_path = None):
@@ -282,7 +301,7 @@ def readNerfSyntheticInfo(path, white_background, eval, extension=".png", ply_pa
         # # Since this data set has no colmap data, we start with random points
         # num_pts = 100_000
         # print(f"Generating random point cloud ({num_pts})...")
-        
+
         # # We create random points inside the bounds of the synthetic Blender scenes
         # xyz = np.random.random((num_pts, 3)) * 2.6 - 1.3
         # shs = np.random.random((num_pts, 3)) / 255.0
